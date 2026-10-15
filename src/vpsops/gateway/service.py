@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from vpsops.common.canon import call_digest
-from vpsops.common.schema import BY_NAME, WRITE, public_tools
+from vpsops.common.schema import BY_NAME, WRITE, public_tools, validate
 
 from .config import Client, Config, Host
 from .state import Job, Lease, State, Stream, new_id
@@ -101,6 +101,8 @@ class Gateway:
 
     async def call(self, client: Client, body: dict, ip: str) -> tuple[int, dict]:
         sid, seq, tool, args = body.get("stream"), body.get("seq"), body.get("tool"), body.get("args") or {}
+        if not isinstance(tool, str) or not isinstance(args, dict):
+            return 400, {"error": "bad_request"}
         checked = self._check_stream(client, sid, seq)
         if isinstance(checked, tuple):
             self.audit.write(event="rejected", client=client.name, stream=sid, seq=seq, tool=tool,
@@ -122,6 +124,8 @@ class Gateway:
             status, data = 429, {"error": "rate_limited", "message": "调用过于频繁"}
         elif tool not in BY_NAME:
             status, data = 400, {"error": "unknown_tool"}
+        elif err := validate(BY_NAME[tool]["inputSchema"], args):
+            status, data = 400, {"error": "bad_args", "message": err}
         else:
             try:
                 status, data = await self._dispatch(client, s, seq, tool, args)
@@ -172,9 +176,17 @@ class Gateway:
         if host.env == "prod":
             lease = self.state.active_lease(client.name, self.cfg.lease_idle)
             if not lease:
+                if not self.tg.enabled:
+                    return 403, {"error": "approval_unavailable", "message": "Gateway 未配置 Telegram，无法授权 prod 写操作"}
+                if self.state.pending_count(client.name) >= self.cfg.max_pending:
+                    return 429, {"error": "too_many_pending",
+                                 "message": f"已有 {self.cfg.max_pending} 个请求在等待授权，先用 job 查询它们"}
                 job.status = "pending_approval"
                 self.state.jobs[job.id] = job
-                await self._ask_approval(client, job)
+                if not await self._ask_approval(client, job):
+                    job.status, job.updated = "failed", time.time()
+                    job.result = {"ok": False, "error": "approval_unavailable", "message": "审批消息发送失败"}
+                    return 503, job.result
                 return 200, {"status": "pending_approval", "job": job.id,
                              "message": "prod 写操作需要授权，已推送到 Telegram。稍后用 job 工具查询。",
                              "expires_in": self.cfg.approval_ttl}
@@ -182,9 +194,11 @@ class Gateway:
             lease.calls += 1
             lease.writes.append(f"{time.strftime('%H:%M')} {tool} {host.name} {self._target_of(args)}")
             if self.cfg.notify_each_write:
-                await self.tg.send(f"✏️ <b>{esc(client.name)}</b> {esc(tool)} {esc(host.name)} "
-                                   f"{esc(self._target_of(args))}\nreason：{esc(args.get('reason', ''))}",
-                                   buttons=[[("撤销租约", f"revoke:{client.name}")]], silent=True)
+                mid = await self.tg.send(f"✏️ <b>{esc(client.name)}</b> {esc(tool)} {esc(host.name)} "
+                                         f"{esc(self._target_of(args))}\nreason：{esc(args.get('reason', ''))}",
+                                         buttons=[[("撤销租约", f"revoke:{client.name}")]], silent=True)
+                if mid is not None:
+                    self.state.revoke_buttons[mid] = client.name
         self.state.jobs[job.id] = job
         if tool == "deploy":
             self._spawn(self._run_job(job))
@@ -241,40 +255,66 @@ class Gateway:
 
     # ------------------------------------------------------------ 授权
 
-    async def _ask_approval(self, client: Client, job: Job):
+    def _card(self, job: Job) -> str:
+        return (f"<code>{esc(job.tool)}</code> {esc(job.host)} {esc(self._target_of(job.args))}\n"
+                f"reason：{esc(job.args.get('reason', ''))}")
+
+    async def _ask_approval(self, client: Client, job: Job) -> bool:
         choices = [(fmt_dur(sec), f"grant:{job.id}:{sec}") for sec in self.cfg.lease_choices]
         text = (f"🔐 <b>{esc(client.name)}</b> 请求 prod 写权限\n"
-                f"首个操作：<code>{esc(job.tool)}</code> {esc(job.host)} {esc(self._target_of(job.args))}\n"
-                f"reason：{esc(job.args.get('reason', ''))}\n<pre>{fmt_args(self._agent_args(job.args))}</pre>")
-        await self.tg.send(text, buttons=[choices, [("拒绝", f"reject:{job.id}")]])
-        self.audit.write(event="approval_requested", client=client.name, job=job.id, tool=job.tool, host=job.host)
+                f"首个操作：{self._card(job)}\n<pre>{fmt_args(self._agent_args(job.args))}</pre>\n"
+                f"⚠️ 选择时长 = 该时长内 <b>{esc(client.name)}</b> 的<b>所有</b> prod 写操作直接放行"
+                f"（首个操作立即执行）。")
+        job.message_id = await self.tg.send(text, buttons=[choices, [("拒绝", f"reject:{job.id}")]])
+        self.audit.write(event="approval_requested", client=client.name, job=job.id, tool=job.tool,
+                         host=job.host, delivered=job.message_id is not None)
+        return job.message_id is not None
 
-    async def on_telegram(self, data: str) -> str:
+    async def on_telegram(self, data: str, user_id: int, message_id: int) -> str:
+        """Telegram 层已校验 chat 和审批人；这里校验按钮属于哪条消息、请求状态与时效。"""
         kind, _, rest = data.partition(":")
         if kind == "revoke":
+            if self.state.revoke_buttons.get(message_id) != rest:
+                self.audit.write(event="callback_rejected", user=user_id, data=data[:64], why="message_mismatch")
+                return "按钮无效"
+            self.audit.write(event="lease_revoke_clicked", client=rest, user=user_id)
             return await self.end_lease(rest, "手动撤销") or "没有生效中的租约"
         job_id, _, sec = rest.partition(":")
         job = self.state.jobs.get(job_id)
-        if not job or job.status != "pending_approval":
-            return "该请求已处理或不存在"
-        if time.time() - job.created > self.cfg.approval_ttl:
-            job.status, job.result = "expired", {"ok": False, "error": "approval_expired"}
+        if not job or job.message_id is None or job.message_id != message_id:
+            self.audit.write(event="callback_rejected", user=user_id, data=data[:64], why="message_mismatch")
+            return "按钮无效"
+        if job.status != "pending_approval":
+            return "该请求已处理"
+        now = time.time()
+        if now - job.created > self.cfg.approval_ttl:
+            job.status, job.updated = "expired", now
+            job.result = {"ok": False, "error": "approval_expired", "message": "授权超时未处理"}
+            await self.tg.edit(job.message_id, f"⌛ 已过期：{esc(job.client)} {self._card(job)}")
             return "已过期"
         if kind == "reject":
-            job.status, job.updated = "rejected", time.time()
+            job.status, job.updated = "rejected", now
             job.result = {"ok": False, "error": "rejected", "message": "授权被拒绝"}
-            self.audit.write(event="approval_rejected", client=job.client, job=job.id)
+            self.audit.write(event="approval_rejected", client=job.client, job=job.id, user=user_id)
+            await self.tg.edit(job.message_id, f"❌ 已拒绝：{esc(job.client)} {self._card(job)}")
             return "已拒绝"
         if kind == "grant":
-            duration = int(sec)
+            try:
+                duration = int(sec)
+            except ValueError:
+                return "时长无效"
             if duration not in self.cfg.lease_choices:
                 return "时长无效"
-            now = time.time()
+            # 在任何 await 之前改状态：重复点击/重放的回调看到的已不是 pending
+            job.status, job.updated = "approved", now
             lease = Lease(id=new_id("L"), client=job.client, granted=now, expires=now + duration, last_used=now,
                           calls=1, writes=[f"{time.strftime('%H:%M')} {job.tool} {job.host} {self._target_of(job.args)}"])
             self.state.leases[job.client] = lease
-            self.audit.write(event="lease_granted", client=job.client, lease=lease.id, duration=duration, job=job.id)
+            self.audit.write(event="lease_granted", client=job.client, lease=lease.id, duration=duration,
+                             job=job.id, user=user_id)
             self._spawn(self._run_job(job))
+            # 同一客户端的其他待审卡片不自动执行（你没看过）；它们照常可点或过期，AI 重新发起时会被租约放行
+            await self.tg.edit(job.message_id, f"✅ 已授权 {fmt_dur(duration)}：{esc(job.client)} {self._card(job)}")
             return f"已授权 {fmt_dur(duration)}"
         return "未知操作"
 
@@ -340,10 +380,11 @@ class Gateway:
                     await self.end_lease(name, "到期")
                 elif now - lease.last_used >= self.cfg.lease_idle:
                     await self.end_lease(name, "空闲超时")
-            for job in self.state.jobs.values():
+            for job in list(self.state.jobs.values()):
                 if job.status == "pending_approval" and now - job.created > self.cfg.approval_ttl:
                     job.status, job.updated = "expired", now
                     job.result = {"ok": False, "error": "approval_expired", "message": "授权超时未处理"}
+                    await self.tg.edit(job.message_id, f"⌛ 已过期：{esc(job.client)} {self._card(job)}")
             self.state.prune(self.cfg.reconcile_window)
             for key in [k for k in self.calls if k[0] not in self.state.streams]:
                 del self.calls[key]

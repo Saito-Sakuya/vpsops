@@ -15,16 +15,35 @@ from vpsops.proxy.core import Core, Revoked
 TOKENS = {"codex": "vpo_codex", "claude-code": "vpo_claude"}
 
 
+OWNER = 42
+
+
 class FakeTelegram:
     enabled = True
 
     def __init__(self):
         self.sent = []
+        self.edits = []
         self.on_callback = None
 
     async def send(self, text, buttons=None, silent=False):
         self.sent.append((text, buttons))
-        return len(self.sent)
+        return len(self.sent)  # message_id
+
+    async def edit(self, message_id, text):
+        self.edits.append((message_id, text))
+
+    def card(self, job_id):
+        """返回包含该 job 按钮的消息 id。"""
+        for mid, (_, buttons) in enumerate(self.sent, 1):
+            if buttons and any(job_id in d for row in buttons for _, d in row):
+                return mid
+        raise AssertionError("没有该 job 的卡片")
+
+    async def click(self, gw, data, message_id=None):
+        if message_id is None:
+            message_id = self.card(data.split(":")[1])
+        return await gw.on_telegram(data, OWNER, message_id)
 
     async def poll(self):
         await asyncio.Event().wait()
@@ -94,7 +113,7 @@ async def test_dev_write_passes_prod_write_needs_lease(env):
     text, buttons = env["tg"].sent[-1]
     assert "codex" in text and "prod" in text
     grant = buttons[0][0][1]
-    assert await env["gw"].on_telegram(grant) == "已授权 30m"
+    assert await env["tg"].click(env["gw"], grant) == "已授权 30m"
     await asyncio.sleep(0.05)
     j = await core.call("job", {"id": job})
     assert j["status"] == "done"
@@ -104,7 +123,7 @@ async def test_dev_write_passes_prod_write_needs_lease(env):
     # 另一个客户端没有租约
     other = env["make_core"]("claude-code")
     await other.start()
-    r = await other.call("service", {"host": "web-1", "name": "api", "action": "reload", "reason": "x"})
+    r = await other.call("service", {"host": "web-1", "name": "api", "action": "reload", "reason": "other client"})
     assert r["status"] == "pending_approval"
     assert await core.reconcile_once()
 
@@ -113,12 +132,16 @@ async def test_reject_and_revoke_lease(env):
     core = env["make_core"]()
     await core.start()
     r = await core.call("deploy", {"host": "web-1", "target": "api", "version": "v1", "reason": "rel"})
-    assert await env["gw"].on_telegram(f"reject:{r['job']}") == "已拒绝"
+    assert await env["tg"].click(env["gw"], f"reject:{r['job']}") == "已拒绝"
     assert (await core.call("job", {"id": r["job"]}))["status"] == "rejected"
     r = await core.call("deploy", {"host": "web-1", "target": "api", "version": "v1", "reason": "rel"})
-    await env["gw"].on_telegram(f"grant:{r['job']}:1800")
+    await env["tg"].click(env["gw"], f"grant:{r['job']}:1800")
     assert env["gw"].state.active_lease("codex", 1800)
-    assert await env["gw"].on_telegram("revoke:codex") == "租约已撤销"
+    # 撤销按钮只在写操作通知消息上有效
+    assert await env["gw"].on_telegram("revoke:codex", OWNER, 1) == "按钮无效"
+    await core.call("service", {"host": "web-1", "name": "api", "action": "reload", "reason": "again"})
+    notify_mid = len(env["tg"].sent)
+    assert await env["gw"].on_telegram("revoke:codex", OWNER, notify_mid) == "租约已撤销"
     r = await core.call("deploy", {"host": "web-1", "target": "api", "version": "v2", "reason": "rel"})
     assert r["status"] == "pending_approval"
 
@@ -204,3 +227,62 @@ async def test_bad_token_and_invisible_host(env):
     r = await core.call("status", {"host": "web-1"})
     assert r["error"] == "unknown_host" and r["available"] == ["dev-1"]
     assert set(await core.call("hosts", {})) == {"dev-1"}
+
+
+async def _pending(env, core, version="v1"):
+    r = await core.call("deploy", {"host": "web-1", "target": "api", "version": version, "reason": "rel"})
+    assert r["status"] == "pending_approval"
+    return r["job"]
+
+
+async def test_callback_must_come_from_its_own_card(env):
+    core = env["make_core"]()
+    await core.start()
+    j1 = await _pending(env, core, "v1")
+    j2 = await _pending(env, core, "v2")
+    # 伪造：在 j1 的卡片消息上发送 j2 的 grant 数据
+    forged = await env["gw"].on_telegram(f"grant:{j2}:1800", OWNER, env["tg"].card(j1))
+    assert forged == "按钮无效"
+    assert not env["gw"].state.active_lease("codex", 1800)
+    assert env["gw"].state.jobs[j2].status == "pending_approval"
+
+
+async def test_double_click_runs_once(env):
+    core = env["make_core"]()
+    await core.start()
+    job = await _pending(env, core)
+    first, second = await asyncio.gather(env["tg"].click(env["gw"], f"grant:{job}:1800"),
+                                         env["tg"].click(env["gw"], f"grant:{job}:1800"))
+    assert sorted([first, second]) == sorted(["已授权 30m", "该请求已处理"])
+    await asyncio.sleep(0.05)
+    deploys = [p for _, p in env["calls"] if p["op"] == "deploy"]
+    assert len(deploys) == 1
+    assert any("已授权" in t for _, t in env["tg"].edits)  # 卡片按钮已被移除
+
+
+async def test_pending_limit_and_no_telegram(env):
+    core = env["make_core"]()
+    await core.start()
+    for i in range(env["gw"].cfg.max_pending):
+        await _pending(env, core, f"v{i}")
+    r = await core.call("deploy", {"host": "web-1", "target": "api", "version": "v9", "reason": "rel"})
+    assert r["error"] == "too_many_pending"
+    env["tg"].enabled = False
+    other = env["make_core"]("claude-code")
+    await other.start()
+    r = await other.call("deploy", {"host": "web-1", "target": "api", "version": "v1", "reason": "rel"})
+    assert r["error"] == "approval_unavailable"
+
+
+async def test_server_side_schema(env):
+    core = env["make_core"]()
+    await core.start()
+    r = await core.call("service", {"host": "dev-1", "name": "api", "action": "rm", "reason": "x" * 10})
+    assert r["error"] == "bad_args"
+    r = await core.call("service", {"host": "dev-1", "name": "api", "action": "restart"})
+    assert r["error"] == "bad_args" and "reason" in r["message"]
+    r = await core.call("logs", {"hosts": ["dev-1"] * 21, "source": "nginx"})
+    assert r["error"] == "bad_args"
+    r = await core.call("status", {"host": "dev-1", "extra": 1})
+    assert r["error"] == "bad_args"
+    assert not [p for _, p in env["calls"] if p["op"] == "service"]

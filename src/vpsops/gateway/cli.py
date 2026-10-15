@@ -19,7 +19,7 @@ def cmd_serve(args):
     from .telegram import Telegram
 
     cfg = config.load(args.config)
-    gw = Gateway(cfg, SSHPool(cfg), Telegram(cfg.tg_token, cfg.tg_chat))
+    gw = Gateway(cfg, SSHPool(cfg), Telegram(cfg.tg_token, cfg.tg_chat, cfg.tg_approvers))
     ssl_ctx = None
     if args.tls_cert:
         ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -47,7 +47,9 @@ def cmd_check(args):
     print(f"监听 {cfg.listen_host}:{cfg.listen_port}")
     print(f"主机 {len(cfg.hosts)}：" + ", ".join(f"{h.name}({h.env})" for h in cfg.hosts.values()))
     print(f"客户端 {len(cfg.clients)}：" + ", ".join(cfg.clients))
-    print("Telegram：" + ("已配置" if cfg.tg_token and cfg.tg_chat else "未配置"))
+    approvers = cfg.tg_approvers or ({cfg.tg_chat} if cfg.tg_chat and cfg.tg_chat > 0 else set())
+    print("Telegram：" + ("已配置" if cfg.tg_token and cfg.tg_chat else "未配置")
+          + (f"，审批人 {sorted(approvers)}" if approvers else ""))
 
 
 def main(argv=None):

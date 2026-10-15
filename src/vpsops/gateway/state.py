@@ -56,10 +56,11 @@ class Job:
     host: str
     stream: str
     seq: int
-    status: str  # pending_approval | running | done | failed | rejected | expired
+    status: str  # pending_approval | approved | running | done | failed | rejected | expired
     created: float
     updated: float
     result: dict | None = None
+    message_id: int | None = None  # 审批卡片的消息 id：只接受来自这条消息的按钮
 
     def view(self) -> dict:
         v = {"id": self.id, "tool": self.tool, "host": self.host, "status": self.status,
@@ -74,6 +75,7 @@ class State:
         self.streams: dict[str, Stream] = {}
         self.leases: dict[str, Lease] = {}
         self.jobs: dict[str, Job] = {}
+        self.revoke_buttons: dict[int, str] = {}  # 写操作通知消息 id -> 客户端（撤销按钮只在这些消息上有效）
         self._rate: dict[str, list[float]] = {}
         self._revoked_path = state_dir / "revoked.json"
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -114,3 +116,9 @@ class State:
             del self.streams[sid]
         for jid in [k for k, j in self.jobs.items() if j.updated < cutoff]:
             del self.jobs[jid]
+        if len(self.revoke_buttons) > 500:
+            for mid in sorted(self.revoke_buttons)[:-500]:
+                del self.revoke_buttons[mid]
+
+    def pending_count(self, client: str) -> int:
+        return sum(1 for j in self.jobs.values() if j.client == client and j.status == "pending_approval")

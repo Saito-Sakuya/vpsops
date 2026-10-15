@@ -52,8 +52,10 @@ class Config:
     stream_idle: int = 1800
     reconcile_window: int = 86400
     rate_per_min: int = 120
+    max_pending: int = 3              # 每个客户端同时等待授权的请求上限（防审批轰炸）
     tg_token: str | None = None
     tg_chat: int | None = None
+    tg_approvers: set[int] | None = None  # None = 私聊时默认 {chat_id}
 
     def client_by_hash(self, h: str) -> Client | None:
         return next((c for c in self.clients.values() if c.token_sha256 == h), None)
@@ -80,7 +82,11 @@ def load(path: str | Path) -> Config:
     tg = raw.get("telegram") or {}
     tg_token = None
     if tg.get("bot_token_file"):
-        tg_token = Path(tg["bot_token_file"]).read_text().strip()
+        tg_token = Path(tg["bot_token_file"]).read_text().strip() or None
+    tg_chat = int(tg["chat_id"]) if tg.get("chat_id") else None
+    approvers = {int(x) for x in tg["approvers"]} if tg.get("approvers") else None
+    if tg_chat is not None and tg_chat < 0 and not approvers:
+        raise ValueError("telegram.chat_id 是群聊：必须配置 telegram.approvers（允许审批的用户 id 列表）")
     state_dir = Path(raw.get("state_dir", "/var/lib/vpsops-gateway"))
     return Config(
         listen_host=host or "127.0.0.1",
@@ -98,6 +104,8 @@ def load(path: str | Path) -> Config:
         seq_window=int(streams.get("seq_window", 64)),
         stream_idle=seconds(streams.get("idle_timeout", "30m")),
         rate_per_min=int(raw.get("rate_per_min", 120)),
+        max_pending=int(lease.get("max_pending", 3)),
         tg_token=tg_token,
-        tg_chat=int(tg["chat_id"]) if tg.get("chat_id") else None,
+        tg_chat=tg_chat,
+        tg_approvers=approvers,
     )
