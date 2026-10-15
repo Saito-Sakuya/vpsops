@@ -26,6 +26,14 @@ AI 客户端 ─stdio─► vpsops-proxy ──Tailscale/HTTPS──► vpsops-g
 | `deploy/gateway/` | gateway 配置示例、systemd unit |
 | `deploy/install.sh` / `deploy/install.ps1` | Linux / Windows 一键安装入口 |
 
+## 交给 AI Agent 安装
+
+把下面这一句话直接复制给能运行终端命令的 AI Agent：
+
+> 请先阅读 https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/README.md，按文档在我的环境中安装配置 vpsops 并接入当前 AI 客户端，先检查并复用已有部署，缺少部署范围、主机、SSH 或域名信息时向我确认，敏感凭据由我在对应机器交互录入，最后用 check、hosts 和 status 实测验收并列出已完成与待处理项。
+
+已有 Gateway 时可以只安装本机代理；需要部署 Gateway 或 VPS Agent 时，AI Agent 还需要对应主机的 SSH 和管理员权限。下面的安装章节提供了脚本、配置路径和客户端接入方式。
+
 ## 一键安装与运行
 
 **Windows 本机代理**：在 PowerShell 执行，自动安装 uv、Python 3.11 和代理，无需先安装 Git：
@@ -213,6 +221,90 @@ args = ["--client", "codex"]
 Devin Desktop：在其 MCP 设置中添加 stdio server，command `vpsops-proxy`，args `--client devin-desktop`。
 
 重启对应客户端后，先调用 `hosts` 检查可见主机及能力。代理更新使用 `uv tool upgrade vpsops`，更新后重启客户端；已有本地源码时，也可在仓库根目录执行 `uv tool install '.[proxy]'`。
+
+## 使用方式
+
+### 首次连接
+
+1. 用当前客户端对应的名称执行 `vpsops-proxy --client codex login`，录入 Gateway 的 HTTPS 地址和该客户端的 token；Claude Code 使用 `claude-code`，Devin Desktop 使用 `devin-desktop`。
+2. 执行 `vpsops-proxy --client codex check`，确认连接正常、可取得 9 个工具且账本核对一致；其他客户端替换相应名称。
+3. 按上面的 MCP 配置接入客户端并重启，然后让 AI 调用 `hosts`，确认能看到预期主机及其登记的能力，再用 `status` 检查实际主机状态。
+
+`check` 检查代理与 Gateway 的连接和核对机制；VPS 的 SSH、Agent 和业务状态还需要通过 `hosts`、`status` 及返回的错误确认。终端中直接运行代理后等待输入是 MCP stdio 服务的正常行为，日常操作应在已接入 MCP 的 AI 客户端里发起。
+
+### 可以直接对 AI 说
+
+下面的主机名、日志源、配置名、服务名和部署目标都是示例，使用时替换为 `hosts` 返回的实际名称。AI 应先确认相应能力已经登记。
+
+| 任务 | 可复制给 AI 的请求 | 使用的工具 |
+|---|---|---|
+| 查看可用主机 | 用 vpsops 列出我能访问的主机、环境，以及每台主机登记的能力。 | `hosts` |
+| 检查运行状态 | 检查所有可见主机的负载、内存、磁盘、失败服务和容器状态，汇总异常及对应主机。 | `status` |
+| 多主机排查日志 | 查看 web-1 和 web-2 的 api 日志源，读取最近 15 分钟的 200 行日志并筛选 ERROR 或 Exception，汇总错误。 | `logs` |
+| 阅读配置 | 读取 web-1 登记的 nginx 配置，说明当前设置并保留返回的 sha256。 | `config_read` |
+| 修改配置 | 把 web-1 的 nginx 配置中 worker_connections 调整为 2048，先读取实际内容再精确替换，填写改动原因并复查结果。 | `config_read` → `config_edit` |
+| 恢复配置 | 将 web-1 的 nginx 配置恢复到最近备份，原因是撤销刚才的配置调整，完成后复查配置和服务状态。 | `config_restore` |
+| 管理服务 | 重启 web-1 登记的 api 服务，原因是应用配置已更新，完成后报告服务状态。 | `service` |
+| 发布版本 | 将 web-1 登记的 api 目标部署到 v1.2.3，原因是发布该版本，返回任务后跟踪到结束并报告结果。 | `deploy` → `job` |
+| 回滚版本 | 将 web-1 的 api 部署目标回滚到上一版本，原因是当前版本出现异常，查询任务并报告回滚结果。 | `deploy`（`version="rollback"`）→ `job` |
+
+日志源可以是文件、journald 或 Compose 服务；`since` 仅适用于后两种，文件日志使用 `lines` 和 `grep` 筛选。服务操作支持 `restart`、`reload`、`up`，其中 Compose 不支持 `reload`。部署版本必须满足目标的版本正则，回滚需要存在已知的上一版本。
+
+### 生产授权与任务查询
+
+读操作可访问该客户端有权限查看的主机；dev/staging 写操作直接执行，prod 写操作需要当前客户端持有有效租约。没有有效租约时，请求返回 `pending_approval` 和 `job`，并通过 Telegram 发送授权消息；你选择 30 分钟、2 小时或 4 小时后，Gateway 执行已经提交的原请求。
+
+授权期间，当前客户端后续的 prod 写操作会直接执行并按配置发送通知；其他客户端的租约独立计算。可以在 Telegram 撤销租约，租约也会在到期或空闲超时后失效；撤销租约影响后续写操作，不会撤回已完成的操作。
+
+`deploy` 异步返回 `job`；查询时把这个值作为 `job` 工具的 **`id` 参数**。等待授权时先完成 Telegram 操作再查询；运行中可相隔 30 秒查询一次，避免重复提交同一写请求。
+
+| `job` 返回状态 | 含义与下一步 |
+|---|---|
+| `pending_approval` | 等待 Telegram 授权；当前写操作尚未执行。 |
+| `running` | 任务正在执行，稍后再次查询。 |
+| `done` | 任务成功，查看 `result` 中的实际结果。 |
+| `failed` | 任务失败，查看错误及回滚结果；修正原因后再决定是否重试。 |
+| `rejected` | 授权已被拒绝，本次请求不执行。 |
+| `expired` | 授权请求已过期，本次请求不执行。 |
+
+配置修改先调用 `config_read`，使用返回的 `sha256` 和实际内容构造 `edits`；每个 `old` 必须恰好匹配一次。哈希过期时重新读取再修改，脱敏行不可编辑。失败时检查返回的错误与 `rolled_back` 等字段，不要把“已尝试恢复”当作恢复成功。
+
+### MCP 参数示例
+
+这些 JSON 是传给 MCP 工具的参数，供 AI 调用时参考。
+
+`logs`：
+
+```json
+{
+  "hosts": ["web-1", "web-2"],
+  "source": "api",
+  "lines": 200,
+  "since": "15m",
+  "grep": "ERROR|Exception"
+}
+```
+
+`deploy`：
+
+```json
+{
+  "host": "web-1",
+  "target": "api",
+  "version": "v1.2.3",
+  "reason": "发布版本 v1.2.3"
+}
+```
+
+随后把响应中的 `job` 值填入 `job` 工具的 `id` 参数。填写名称前先检查 `hosts`，填写版本前确认部署目标允许的版本格式。
+
+### 常见问题
+
+- **客户端找不到 `vpsops-proxy`**：执行 `uv tool update-shell`，重新打开终端并重启 AI 客户端；也可将 MCP command 设置为 `uv tool dir --bin` 目录中的代理可执行文件完整路径。
+- **连接失败或证书域名不匹配**：检查本机和跳板机的 Tailscale 连接、访问规则、Gateway 服务和监听端口；登录时使用与 TLS 证书一致的域名。跳板机日志可用 `journalctl -u vpsops-gateway -n 100 --no-pager` 查看。
+- **看不到主机或能力名称不存在**：先查 Gateway 配置中该客户端的 `envs` 和 `hosts` 条目；具体日志、配置、服务及部署目标由各 VPS 的 `/etc/ai-agent.yaml` 登记，修改这些登记需要对应的管理员权限。
+- **prod 操作一直等待授权**：检查 Telegram 配置与通知，在授权消息中选择租约时长，再查询原 `job`；Gateway 未配置 Telegram 时无法授予 prod 租约。
+- **token 已吊销**：在跳板机运行 `/opt/vpsops/.venv/bin/vpsops-gateway token new <客户端名称>`，把新 hash 写入 `gateway.yaml` 并重启 Gateway，然后在本机对该客户端重新 `login`、`check`。重新登录本身不会恢复被吊销的旧 token。
 
 ## 开发
 
