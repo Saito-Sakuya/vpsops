@@ -2,8 +2,14 @@
 name = "vpsops"
 version = "0.1.0"
 description = "通过跳板机受控地操作 VPS 的 MCP 网关：本地 stdio 代理 + 跳板机 Gateway + VPS ai-agent"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Saito-Sakuya/vpsops"
+Documentation = "https://github.com/Saito-Sakuya/vpsops#readme"
+Issues = "https://github.com/Saito-Sakuya/vpsops/issues"
 
 [project.optional-dependencies]
 proxy = ["mcp>=2.3,<3", "httpx>=0.27", "keyring>=25"]

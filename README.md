@@ -27,51 +27,141 @@ AI 客户端 ─stdio─► vpsops-proxy ──Tailscale/HTTPS──► vpsops-g
 
 ## 安装
 
-### 1. 跳板机
+源码仓库：[Saito-Sakuya/vpsops](https://github.com/Saito-Sakuya/vpsops)。从 GitHub 安装时需要 Git；Python 包使用 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理。
+
+- 跳板机需要 Python **3.11+**、systemd、OpenSSH 和已接入 tailnet 的 Tailscale。下面的 Linux 命令以 Debian 12 / Ubuntu 24.04 为例。
+- 每台 VPS 需要 Python 3、`python3-yaml`、sudo 和 OpenSSH；登记了 Docker Compose、nginx 等能力时，还需要对应程序。
+- 先确认本机能通过 Tailscale 访问跳板机，跳板机能 SSH 到各 VPS；tailnet 访问规则只放行本机到 Gateway 的端口（示例为 `8740`）。
+
+### 1. 在跳板机准备 Gateway
+
+以下命令在跳板机执行。先进入 root shell，后续 Gateway 安装与 VPS 分发步骤都在该 shell 中完成：
 
 ```bash
-sudo useradd --system --home /opt/vpsops vpsops
-sudo git clone <本仓库> /opt/vpsops && cd /opt/vpsops
-sudo uv venv && sudo uv pip install '.[gateway]'
-sudo install -d -m 750 -o root -g vpsops /etc/vpsops-gateway
-sudo ssh-keygen -t ed25519 -N "" -C vpsops-gateway -f /etc/vpsops-gateway/id_ed25519
-sudo chgrp vpsops /etc/vpsops-gateway/id_ed25519 && sudo chmod 640 /etc/vpsops-gateway/id_ed25519
-sudo cp deploy/gateway/gateway.example.yaml /etc/vpsops-gateway/gateway.yaml   # 按实际修改
-sudo /opt/vpsops/.venv/bin/vpsops-gateway token new claude-code   # 每个客户端各一次，hash 写进 yaml
+sudo -i
+apt-get update
+apt-get install -y git curl ca-certificates python3 python3-venv openssh-client sudo
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+id -u vpsops >/dev/null 2>&1 || useradd --system --user-group --home-dir /opt/vpsops --shell /usr/sbin/nologin vpsops
+git clone https://github.com/Saito-Sakuya/vpsops.git /opt/vpsops
+cd /opt/vpsops
+uv sync --locked --no-dev --extra gateway --python /usr/bin/python3
+
+install -d -m 0750 -o root -g vpsops /etc/vpsops-gateway
+if [ ! -f /etc/vpsops-gateway/id_ed25519 ]; then
+  ssh-keygen -t ed25519 -N "" -C vpsops-gateway -f /etc/vpsops-gateway/id_ed25519
+fi
+chown root:vpsops /etc/vpsops-gateway/id_ed25519
+chmod 0640 /etc/vpsops-gateway/id_ed25519
+install -m 0640 -o root -g vpsops deploy/gateway/gateway.example.yaml /etc/vpsops-gateway/gateway.yaml
+install -m 0640 -o root -g vpsops /dev/null /etc/vpsops-gateway/tg.token
 ```
 
-TLS 证书：`tailscale cert <跳板机的 tailnet 域名>` 可直接拿到受信任证书，放到 `/etc/vpsops-gateway/tls.{crt,key}`。
+使用系统 Python 创建虚拟环境，确保 systemd 服务账号也能访问解释器。上面的命令用于首次安装；已有 `vpsops` 用户或 SSH key 时保留它们。
+
+为每个需要接入的客户端分别生成 token：
 
 ```bash
-sudo cp deploy/gateway/vpsops-gateway.service /etc/systemd/system/
-sudo systemctl enable --now vpsops-gateway
+/opt/vpsops/.venv/bin/vpsops-gateway token new claude-code
+/opt/vpsops/.venv/bin/vpsops-gateway token new codex
+/opt/vpsops/.venv/bin/vpsops-gateway token new devin-desktop
 ```
 
-### 2. 每台 VPS
+明文 token 用于稍后的本机 `login`；`gateway.yaml` 只填写命令输出的 `token_sha256`。编辑 `/etc/vpsops-gateway/gateway.yaml`：
+
+- `listen`：跳板机真实的 Tailscale IP 和端口，例如 `100.64.0.5:8740`。
+- `hosts`：各 VPS 的实际地址和环境；删除没有使用的示例主机。
+- `clients`：填入各客户端的 token hash 和可访问环境；删除没有使用的客户端条目。
+- `telegram.chat_id`：授权消息所在会话的 ID；将 Bot token 写入 `/etc/vpsops-gateway/tg.token`。未配置 Telegram 时，prod 写操作无法获得授权。
+
+在 Tailscale 管理后台启用 [HTTPS 证书](https://tailscale.com/docs/how-to/set-up-https-certificates)，然后申请证书。把下面的域名改为跳板机实际的完整 tailnet 域名：
 
 ```bash
-scp -r agent deploy root@vps:/tmp/vpsops/
-ssh root@vps 'sh /tmp/vpsops/deploy/vps/install.sh "$(cat id_ed25519.pub)" <跳板机IP>'
-# 然后编辑 /etc/ai-agent.yaml，并把该主机写进跳板机的 gateway.yaml
+TAILNET_NAME=jump.your-tailnet.ts.net
+tailscale cert --cert-file=/etc/vpsops-gateway/tls.crt --key-file=/etc/vpsops-gateway/tls.key "$TAILNET_NAME"
+chown root:vpsops /etc/vpsops-gateway/tls.crt /etc/vpsops-gateway/tls.key
+chmod 0640 /etc/vpsops-gateway/tls.crt /etc/vpsops-gateway/tls.key
 ```
 
-在跳板机上把主机指纹加入 `known_hosts`（人工核对），并测试：
+本机登录时使用 `https://jump.your-tailnet.ts.net:8740`，域名必须与证书一致。通过 `tailscale cert` 保存的证书文件需要定期续期，替换证书后重启 Gateway。
+
+### 2. 从跳板机安装每台 VPS 的 Agent
+
+仍在跳板机的 root shell 中执行，每台 VPS 重复一次。`VPS_HOST` 填该 VPS 的 SSH 地址，`JUMP_IP` 填 **VPS 实际看到的跳板机 SSH 来源 IP**（走 Tailscale 时通常为跳板机的 Tailscale IP）：
 
 ```bash
-echo '{"op":"describe"}' | sudo -u vpsops ssh -i /etc/vpsops-gateway/id_ed25519 ai-ops@10.0.0.11
+cd /opt/vpsops
+VPS_HOST=10.0.0.11
+JUMP_IP=100.64.0.5
+
+ssh "root@$VPS_HOST" 'apt-get update && apt-get install -y python3 python3-yaml sudo && mkdir -p /tmp/vpsops'
+scp -r agent deploy "root@$VPS_HOST:/tmp/vpsops/"
+GATEWAY_PUBKEY=$(cat /etc/vpsops-gateway/id_ed25519.pub)
+ssh "root@$VPS_HOST" "sh /tmp/vpsops/deploy/vps/install.sh '$GATEWAY_PUBKEY' '$JUMP_IP'"
 ```
 
-### 3. 本机（Windows）
+在该 VPS 上以 root 编辑 `/etc/ai-agent.yaml`，只登记实际需要的日志源、配置、服务和部署目标；Compose 路径映射也需按实际填写。安装脚本只安装 Agent 与 SSH/sudo 限制，应用程序需预先安装。VPS 防火墙应限制 SSH 来源为跳板机，并保留所需的管理员维护入口。
+
+回到跳板机，采集主机公钥：
 
 ```bash
-uv tool install "git+<本仓库>#egg=vpsops[proxy]"     # 或在仓库目录：uv tool install '.[proxy]'
-vpsops-proxy --client claude-code login            # 录入 gateway 地址和 token，存入 Windows 凭据管理器
+ssh-keyscan -t ed25519 "$VPS_HOST" > /tmp/vpsops-host-key
+ssh-keygen -lf /tmp/vpsops-host-key
+```
+
+通过 VPS 控制台运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`，核对指纹一致后再保存并测试：
+
+```bash
+cat /tmp/vpsops-host-key >> /etc/vpsops-gateway/known_hosts
+chown root:vpsops /etc/vpsops-gateway/known_hosts
+chmod 0640 /etc/vpsops-gateway/known_hosts
+printf '%s\n' '{"op":"describe"}' | sudo -u vpsops ssh -T \
+  -i /etc/vpsops-gateway/id_ed25519 \
+  -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile=/etc/vpsops-gateway/known_hosts "ai-ops@$VPS_HOST"
+```
+
+返回 JSON 后，将该主机的地址与环境填入跳板机的 `/etc/vpsops-gateway/gateway.yaml`。
+
+### 3. 启动 Gateway
+
+在跳板机确认配置、token hash、Telegram、TLS 证书和主机指纹都已填写，再执行：
+
+```bash
+sudo -u vpsops /opt/vpsops/.venv/bin/vpsops-gateway check -c /etc/vpsops-gateway/gateway.yaml
+install -m 0644 /opt/vpsops/deploy/gateway/vpsops-gateway.service /etc/systemd/system/vpsops-gateway.service
+systemctl daemon-reload
+systemctl enable --now vpsops-gateway
+systemctl status vpsops-gateway --no-pager
+```
+
+启动异常时查看 `journalctl -u vpsops-gateway -n 100 --no-pager`。修改 `gateway.yaml` 后需要 `systemctl restart vpsops-gateway`。
+
+### 4. 本机安装与客户端接入（Windows）
+
+先安装 [Git for Windows](https://git-scm.com/downloads/win) 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)，然后在 PowerShell 中安装代理。`--python 3.11` 让 uv 选择或自动安装 Python 3.11：
+
+```powershell
+uv tool install --python 3.11 "vpsops[proxy] @ git+https://github.com/Saito-Sakuya/vpsops.git"
+uv tool update-shell
+```
+
+重新打开终端，使 PATH 生效。每个客户端分别登录，输入上面配置的 HTTPS 域名地址和对应的明文 token，token 保存在 Windows 凭据管理器中：
+
+```powershell
+vpsops-proxy --client claude-code login
 vpsops-proxy --client claude-code check
+vpsops-proxy --client codex login
+vpsops-proxy --client codex check
 ```
 
-接入客户端（每个客户端用自己的名称和 token）：
+如果使用 Devin Desktop，同样执行 `vpsops-proxy --client devin-desktop login` 和 `check`。使用 Tailscale 证书时，登录中的自签 CA 路径直接回车即可。
 
-```bash
+Claude Code 接入：
+
+```powershell
 claude mcp add --scope user vpsops -- vpsops-proxy --client claude-code
 ```
 
@@ -85,10 +175,14 @@ args = ["--client", "codex"]
 
 Devin Desktop：在其 MCP 设置中添加 stdio server，command `vpsops-proxy`，args `--client devin-desktop`。
 
+重启对应客户端后，先调用 `hosts` 检查可见主机及能力。代理更新使用 `uv tool upgrade vpsops`，更新后重启客户端；已有本地源码时，也可在仓库根目录执行 `uv tool install '.[proxy]'`。
+
 ## 开发
 
 ```bash
-uv sync
+git clone https://github.com/Saito-Sakuya/vpsops.git
+cd vpsops
+uv sync --locked
 uv run pytest
 ```
 
