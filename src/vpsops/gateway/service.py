@@ -282,12 +282,8 @@ class Gateway:
         lease = self.state.leases.pop(client_name, None)
         if not lease:
             return None
-        streams = self.state.client_streams(client_name, self.cfg.reconcile_window)
-        lines = "\n".join(f"  {esc(w)}" for w in lease.writes[-30:]) or "  （无）"
-        stream_lines = "\n".join(f"  {s.id} 调用 {len(s.digests)} 次 集合哈希 {s.summary()['set_hash'][:12]}…"
-                                 for s in streams)
-        await self.tg.send(f"📋 <b>{esc(client_name)}</b> 租约 {lease.id} 已结束（{esc(why)}）\n"
-                           f"写操作 {len(lease.writes)} 次：\n{lines}\n流：\n{stream_lines}", silent=True)
+        await self.tg.send(f"📋 <b>{esc(client_name)}</b> 租约已结束（{esc(why)}）\n"
+                           f"本次写操作：{len(lease.writes)} 次", silent=True)
         self.audit.write(event="lease_end", client=client_name, lease=lease.id, why=why, writes=lease.writes)
         return "租约已撤销"
 
