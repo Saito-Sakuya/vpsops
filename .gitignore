@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+# 真实配置和密钥不入库
+gateway.yaml
+tg.token
+id_ed25519*
+known_hosts
+*.crt
+*.key

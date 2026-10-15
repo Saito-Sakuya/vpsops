@@ -1,0 +1,36 @@
+# /etc/vpsops-gateway/gateway.yaml
+listen: 100.64.0.5:8740            # 只监听 Tailscale 地址
+
+state_dir: /var/lib/vpsops-gateway
+audit_dir: /var/log/vpsops-gateway
+
+ssh:
+  key: /etc/vpsops-gateway/id_ed25519          # ssh-keygen -t ed25519 -N "" -f ...
+  known_hosts: /etc/vpsops-gateway/known_hosts # ssh-keyscan 生成后人工核对指纹
+
+hosts:                             # 只记录地址和环境；能做什么由各 VPS 的 /etc/ai-agent.yaml 决定
+  web-1:   { addr: 10.0.0.11, env: prod }
+  web-2:   { addr: 10.0.0.12, env: prod }
+  stage-1: { addr: 10.0.0.31, env: staging }
+  build-1: { addr: 10.0.0.21, env: dev }
+
+clients:                           # token 用 vpsops-gateway token new <名称> 生成
+  claude-code:   { token_sha256: "<64 位 hex>", envs: [dev, staging, prod] }
+  codex:         { token_sha256: "<64 位 hex>", envs: [dev, staging, prod] }
+  devin-desktop: { token_sha256: "<64 位 hex>", envs: [dev, staging, prod] }
+
+lease:
+  choices: [30m, 2h, 4h]           # Telegram 上可选的授权时长
+  idle_timeout: 30m                # 租约空闲多久自动失效
+  approval_ttl: 10m                # 授权请求多久不处理就过期
+  notify_each_write: true          # 租约期间每次 prod 写操作发静默通知
+
+streams:
+  seq_window: 64
+  idle_timeout: 30m
+
+rate_per_min: 120
+
+telegram:
+  bot_token_file: /etc/vpsops-gateway/tg.token   # 权限 600
+  chat_id: 123456789                             # 只接受这个会话里的按钮

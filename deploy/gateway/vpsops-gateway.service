@@ -1,0 +1,31 @@
+[Unit]
+Description=vpsops gateway
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=vpsops
+Group=vpsops
+ExecStart=/opt/vpsops/.venv/bin/vpsops-gateway serve -c /etc/vpsops-gateway/gateway.yaml \
+    --tls-cert /etc/vpsops-gateway/tls.crt --tls-key /etc/vpsops-gateway/tls.key
+Restart=on-failure
+RestartSec=3
+StateDirectory=vpsops-gateway
+LogsDirectory=vpsops-gateway
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadOnlyPaths=/etc/vpsops-gateway
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

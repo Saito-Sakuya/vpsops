@@ -1,0 +1,47 @@
+# /etc/ai-agent.yaml —— 这台机器允许 AI 做什么的唯一来源
+# 归 root 所有，权限 600：  chown root:root /etc/ai-agent.yaml && chmod 600 /etc/ai-agent.yaml
+# 没有列出的日志/配置/服务/部署目标，一律不可访问。
+
+max_output_kb: 64
+
+compose_projects:          # 名称 → docker compose 项目目录
+  app: /opt/app
+
+logs:                      # file:<路径> | journald:<unit> | compose:<项目>/<服务>
+  nginx:  file:/var/log/nginx/error.log
+  access: file:/var/log/nginx/access.log
+  api:    compose:app/api
+  ssh:    journald:ssh
+
+configs:
+  nginx:
+    path: /etc/nginx/nginx.conf
+    validate: nginx -t -q -c {tmp}     # {tmp}=待安装的临时文件；不写 {tmp} 则替换后用 {path} 校验，失败自动还原
+    apply: systemctl reload nginx
+    check: nginx                       # 可选：生效后检查 services 里的这个服务
+  app-env:
+    path: /opt/app/.env
+    secret: true                       # 敏感值脱敏显示，且不可修改；可以新增 key
+    apply: compose:app/api restart     # compose:<项目>/<服务> restart|up
+    check: api
+
+services:                  # systemd:<unit> | compose:<项目>/<服务>
+  nginx: systemd:nginx
+  api:   compose:app/api
+
+deploys:
+  api:
+    type: compose-image                # 修改 compose 目录 .env 里的 env_var，然后 up -d
+    compose: /opt/app
+    env_var: API_TAG                   # docker-compose.yml 里写 image: ghcr.io/me/api:${API_TAG}
+    services: [api]
+    version_regex: '^v\d+\.\d+\.\d+$'
+    health: http://127.0.0.1:8080/healthz
+    health_timeout: 90
+  # blog:
+  #   type: script                     # 运行 root 维护的脚本，版本通过 $VERSION 传入；退出码非 0 视为失败
+  #   run: /opt/blog/deploy.sh
+  #   version_regex: '^[0-9a-f]{7,40}$'
+  #   health: http://127.0.0.1:3000/
+
+redact_extra: []           # 追加的脱敏正则

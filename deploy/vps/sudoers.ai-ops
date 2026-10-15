@@ -1,0 +1,4 @@
+# /etc/sudoers.d/ai-ops   (visudo -cf 检查后放入，权限 440)
+# 末尾的 "" 表示不允许带任何参数，防止 --config 等参数绕过 /etc/ai-agent.yaml
+ai-ops ALL=(root) NOPASSWD: /usr/local/bin/ai-agent ""
+Defaults:ai-ops !requiretty
