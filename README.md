@@ -24,10 +24,47 @@ AI 客户端 ─stdio─► vpsops-proxy ──Tailscale/HTTPS──► vpsops-g
 | `src/vpsops/common/` | 工具定义、规范化 JSON 与 digest |
 | `deploy/vps/` | VPS 安装脚本、sudoers、sshd、配置示例 |
 | `deploy/gateway/` | gateway 配置示例、systemd unit |
+| `deploy/install.sh` / `deploy/install.ps1` | Linux / Windows 一键安装入口 |
+
+## 一键安装与运行
+
+**Windows 本机代理**：在 PowerShell 执行，自动安装 uv、Python 3.11 和代理，无需先安装 Git：
+
+```powershell
+irm https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/deploy/install.ps1 | iex
+```
+
+安装完成后重新打开终端，为需要使用的客户端执行 `vpsops-proxy --client codex login` 和 `vpsops-proxy --client codex check`。客户端名可以替换为 `claude-code` 或 `devin-desktop`。也可以一条命令完成安装、交互登录和连接检查：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/deploy/install.ps1))) -Client codex -Login
+```
+
+**已安装 uv 时直接运行**：以下命令在隔离环境中启动 MCP stdio 代理，首次需要先将命令末尾加上 `login` 录入 Gateway 地址和 token。正常启动后会等待 MCP 客户端通过标准输入发送请求：
+
+```powershell
+uvx --python 3.11 --from "vpsops[proxy] @ https://github.com/Saito-Sakuya/vpsops/archive/refs/heads/master.tar.gz" vpsops-proxy --client codex
+```
+
+**Linux 跳板机**：先安装并连接 Tailscale，然后运行（Debian 12 / Ubuntu 24.04）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/deploy/install.sh | sudo sh -s -- gateway
+```
+
+脚本准备依赖、Gateway、SSH key、配置模板和 systemd unit，保留已有配置与密钥。首次仍需按下文填写主机、客户端 token、Telegram 和 TLS；配置完成后运行 `sudo systemctl enable --now vpsops-gateway`。已有安装可重复执行以更新源码和依赖，运行中的服务需要在更新完成后重启。
+
+**每台 Linux VPS**：在 VPS 上运行，把公钥和来源 IP 替换为跳板机的实际值：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/deploy/install.sh | sudo sh -s -- agent 'ssh-ed25519 AAAA... vpsops-gateway' '100.64.0.5'
+```
+
+公钥取自跳板机 `/etc/vpsops-gateway/id_ed25519.pub`，IP 是 VPS 实际看到的跳板机 SSH 来源。安装后以 root 编辑 VPS 的 `/etc/ai-agent.yaml`，再按下文核对 SSH 主机指纹。已在 root shell 中时，可省略上述命令的 `sudo`。
 
 ## 安装
 
-源码仓库：[Saito-Sakuya/vpsops](https://github.com/Saito-Sakuya/vpsops)。从 GitHub 安装时需要 Git；Python 包使用 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理。
+源码仓库：[Saito-Sakuya/vpsops](https://github.com/Saito-Sakuya/vpsops)。Python 包使用 [uv](https://docs.astral.sh/uv/getting-started/installation/) 管理；下面的手动 Git 安装方式需要 Git，上面的一键客户端入口使用源码压缩包。
 
 - 跳板机需要 Python **3.11+**、systemd、OpenSSH 和已接入 tailnet 的 Tailscale。下面的 Linux 命令以 Debian 12 / Ubuntu 24.04 为例。
 - 每台 VPS 需要 Python 3、`python3-yaml`、sudo 和 OpenSSH；登记了 Docker Compose、nginx 等能力时，还需要对应程序。
@@ -189,3 +226,7 @@ uv run pytest
 测试覆盖：ai-agent（脱敏、精确替换、校验失败/生效失败自动还原、secret 行不可改、部署回滚），
 Gateway+Proxy 端到端（租约、拒绝、撤销、异步部署、偷 token 开新流、插入 seq、gateway 重启），
 真实 MCP stdio 往返，以及本地 asyncssh 服务器上的 SSH 收发与主机密钥校验。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)，Copyright (c) 2026 Saito-Sakuya。
