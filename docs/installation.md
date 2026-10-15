@@ -120,7 +120,7 @@ install -m 0640 -o root -g vpsops /dev/null /etc/vpsops-gateway/tg.token
 - `listen`：填跳板机的 Tailscale IP 和监听端口，例如 `100.64.0.5:8740`。
 - `hosts`：填入各台 VPS 的实际连接地址和所属环境（`dev` / `staging` / `prod`），删掉没用到的示例主机。
 - `clients`：填入每个客户端的 `token_sha256` 和允许访问的环境列表，删掉不用的客户端条目。
-- `telegram.chat_id`：填接收审批消息的 Telegram 会话 ID，并把 Bot Token 写进 `/etc/vpsops-gateway/tg.token`（如果不配 Telegram，所有 `prod` 环境的写操作都无法审批通过）。
+- `telegram.chat_id`：填接收审批消息的 Telegram 会话 ID，并把 Bot Token 写进 `/etc/vpsops-gateway/tg.token`。先按 [Bot 接入指南](telegram.md)创建机器人、取得 ID 并发送测试消息；未配置时，`prod` 写操作无法审批通过。
 
 然后配置 HTTPS 证书。先在 Tailscale 管理后台开启 [HTTPS 证书功能](https://tailscale.com/docs/how-to/set-up-https-certificates)，再把下面命令里的域名换成跳板机真实的 tailnet 域名来申请证书：
 

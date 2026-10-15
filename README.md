@@ -5,6 +5,8 @@
 
 ```text
 你的 AI 客户端 → 本机 Proxy → 跳板机 Gateway → 各台 VPS 的 Agent
+                              ↕
+                       Telegram Bot（审批 / 通知 / 告警）
 ```
 
 你决定每台服务器开放哪些操作，AI 通过固定工具执行。生产环境的写操作需要在 Telegram 授权，本机和 Gateway 会定期核对调用记录。
@@ -15,9 +17,11 @@
 
 把下面这句话发给能运行终端命令的 AI：
 
-> 请阅读 https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/docs/installation.md，检查并复用已有部署，在我的环境中安装 vpsops 并接入当前 AI 客户端；缺少主机、权限等信息时向我确认，敏感凭据由我在对应机器交互输入，完成后用 check、hosts 和 status 实测，列出结果和待办。
+> 请阅读 https://raw.githubusercontent.com/Saito-Sakuya/vpsops/master/docs/installation.md，检查并复用已有部署，在我的环境中安装 vpsops、接入当前 AI 客户端并配置 Telegram 审批；缺少主机、权限等信息时向我确认，敏感凭据由我在对应机器交互输入，完成后用 check、hosts、status 和一条 Telegram 测试消息验收，列出结果和待办。
 
 已有 Gateway 时，只需安装本机代理；要部署 Gateway 或 VPS Agent，还需要对应机器的管理员权限。自己操作可看[一键安装与完整步骤](docs/installation.md)。
+
+Telegram Bot 随 Gateway 一起运行，用来点按钮授权、接收通知和告警。需要你先创建自己的机器人，再按 [Bot 接入指南](docs/telegram.md)填写 Token 和会话 ID。
 
 ### 再加一台服务器
 
@@ -47,6 +51,7 @@ Skill 和[人工接入指南](skills/vpsops-onboard/references/onboarding.md)共
 | 想做什么 | 看这里 |
 |---|---|
 | 首次部署、一键安装、连接 AI 客户端 | [安装指南](docs/installation.md) |
+| 创建和连接 Telegram 审批机器人 | [Bot 接入指南](docs/telegram.md) |
 | 给现有部署添加服务器 | [接入指南](skills/vpsops-onboard/references/onboarding.md) · [AI Skill](skills/vpsops-onboard/SKILL.md) |
 | 查日志、改配置、发布、审批与排错 | [使用指南](docs/usage.md) |
 | 了解代码结构、运行测试 | [开发指南](docs/development.md) |
