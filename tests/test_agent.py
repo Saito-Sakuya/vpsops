@@ -126,3 +126,52 @@ def test_deploy_script_rollback(agent_env, tmp_path):
     r = call("deploy", target="app", version="rollback")["data"]
     assert r["to"] == "v1.0.0"
     assert call("describe")["data"]["deploys"]["app"]["current"] == "v1.0.0"
+
+
+def _symlink_or_skip(target, link):
+    import os
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        import pytest
+        pytest.skip("当前系统不允许创建符号链接")
+
+
+def test_symlinked_config_refused(agent_env, tmp_path):
+    secret = tmp_path / "shadow"
+    secret.write_text("root:$6$hash\n")
+    conf = agent_env["conf"]
+    conf.unlink()
+    _symlink_or_skip(secret, conf)
+    r = agent_env["call"]("config_read", name="app")
+    assert r["error"] == "symlink" and "hash" not in json.dumps(r)
+
+
+def test_symlinked_log_refused(agent_env, tmp_path):
+    secret = tmp_path / "shadow"
+    secret.write_text("root:$6$hash\n")
+    log = tmp_path / "app.log"
+    log.unlink()
+    _symlink_or_skip(secret, log)
+    assert agent_env["call"]("logs", source="app")["error"] == "symlink"
+
+
+def test_symlinked_parent_dir_refused(agent_env, tmp_path):
+    real = tmp_path / "realdir"
+    real.mkdir()
+    (real / "app.conf").write_text("x\n")
+    linked = tmp_path / "linkdir"
+    _symlink_or_skip(real, linked)
+    cfg = agent_env["cfg"]
+    cfg["configs"]["app"]["path"] = str(linked / "app.conf")
+    agent_env["cfg_path"].write_text(json.dumps(cfg))
+    assert agent_env["call"]("config_read", name="app")["error"] == "symlink"
+
+
+def test_non_object_request_rejected():
+    import subprocess
+    import sys
+    from conftest import ROOT
+    r = subprocess.run([sys.executable, str(ROOT / "agent" / "ai_agent.py")], input=b"[1,2]",
+                       capture_output=True, timeout=30)
+    assert json.loads(r.stdout)["error"] == "bad_request"

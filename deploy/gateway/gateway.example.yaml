@@ -24,6 +24,7 @@ lease:
   idle_timeout: 30m                # 租约空闲多久自动失效
   approval_ttl: 10m                # 授权请求多久不处理就过期
   notify_each_write: true          # 租约期间每次 prod 写操作发静默通知
+  max_pending: 3                   # 每个客户端同时等待授权的请求上限
 
 streams:
   seq_window: 64
@@ -33,4 +34,6 @@ rate_per_min: 120
 
 telegram:
   bot_token_file: /etc/vpsops-gateway/tg.token   # root:vpsops，权限 640，供服务账号读取
-  chat_id: 123456789                             # 只接受这个会话里的按钮
+  chat_id: 123456789                             # 推荐填你和 Bot 的私聊 id（= 你的用户 id）
+  # approvers: [123456789]                       # 允许点审批按钮的用户 id；私聊时默认就是 chat_id；
+                                                 # chat_id 为群聊（负数）时必须填写，否则启动失败

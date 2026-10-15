@@ -16,7 +16,7 @@ passwd -l ai-ops >/dev/null
 install -o root -g root -m 755 "$HERE/../../agent/ai_agent.py" /usr/local/bin/ai-agent
 install -d -o root -g root -m 700 /var/lib/ai-agent
 
-install -d -o ai-ops -g ai-ops -m 700 /home/ai-ops/.ssh
+install -d -o root -g ai-ops -m 750 /home/ai-ops/.ssh   # 归 root：ai-ops 无法替换 authorized_keys
 echo "restrict,from=\"$JUMP_IP\",command=\"sudo -n /usr/local/bin/ai-agent\" $PUBKEY" > /home/ai-ops/.ssh/authorized_keys
 chown root:ai-ops /home/ai-ops/.ssh/authorized_keys
 chmod 640 /home/ai-ops/.ssh/authorized_keys   # 归 root：ai-ops 自己改不了

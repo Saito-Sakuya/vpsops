@@ -14,7 +14,9 @@ import json
 import os
 import re
 import shlex
+import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -184,8 +186,45 @@ def sha256_bytes(b):
     return hashlib.sha256(b).hexdigest()
 
 
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def open_regular(path):
+    """以 O_NOFOLLOW 打开普通文件：配置/日志所在目录可能由非 root 用户控制，
+    不能让它通过符号链接把 root 引向 /etc/shadow 之类的文件。"""
+    check_real_path(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | O_NOFOLLOW)
+    except FileNotFoundError:
+        raise OpError("not_found", f"文件不存在：{path}")
+    except OSError as e:
+        if os.path.islink(path):
+            raise OpError("symlink", f"{path} 是符号链接，拒绝访问")
+        raise OpError("io_error", f"{path}：{e.strerror}")
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise OpError("not_regular", f"{path} 不是普通文件")
+    if st.st_nlink > 1 and hasattr(os, "geteuid") and os.geteuid() == 0 and st.st_uid != 0:
+        os.close(fd)
+        raise OpError("hardlink", f"{path} 有多个硬链接且不归 root，拒绝访问")
+    return os.fdopen(fd, "rb")
+
+
+def check_real_path(path):
+    """O_NOFOLLOW 只管最后一段；中间目录被换成链接时 realpath 会和登记路径不一致。"""
+    if os.path.lexists(path) and os.path.realpath(path) != os.path.abspath(path):
+        raise OpError("symlink", f"{path} 的路径中包含符号链接，拒绝访问")
+
+
+def ensure_not_symlink(path):
+    check_real_path(path)
+    if os.path.islink(path):
+        raise OpError("symlink", f"{path} 是符号链接，拒绝写入")
+
+
 def read_text(path, limit=MAX_CONFIG_BYTES):
-    with open(path, "rb") as f:
+    with open_regular(path) as f:
         data = f.read(limit + 1)
     if len(data) > limit:
         raise OpError("too_large", f"{path} 超过 {limit // 1024}KB")
@@ -193,7 +232,8 @@ def read_text(path, limit=MAX_CONFIG_BYTES):
 
 
 def atomic_write(path, data, like=None):
-    """写同目录临时文件 → 复制原文件属主/权限 → os.replace。返回临时文件路径前的结果。"""
+    """写同目录临时文件 → 复制原文件属主/权限 → os.replace（替换的是目录项，不会写穿符号链接）。"""
+    ensure_not_symlink(path)
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".ai-agent-", dir=directory)
     try:
@@ -210,6 +250,7 @@ def atomic_write(path, data, like=None):
 
 
 def write_tmp_like(path, data):
+    ensure_not_symlink(path)
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(prefix=".ai-agent-", dir=directory)
     with os.fdopen(fd, "wb") as f:
@@ -219,9 +260,9 @@ def write_tmp_like(path, data):
 
 
 def copy_owner_mode(src, dst):
-    if not os.path.exists(src):
+    if not os.path.lexists(src) or os.path.islink(src):
         return
-    st = os.stat(src)
+    st = os.lstat(src)
     os.chmod(dst, st.st_mode & 0o7777)
     if hasattr(os, "chown"):
         try:
@@ -372,9 +413,7 @@ def op_status(cfg, args):
 # ---------------------------------------------------------------- logs
 
 def tail_file(path, n):
-    if not os.path.isfile(path):
-        raise OpError("not_found", f"日志文件不存在：{path}")
-    with open(path, "rb") as f:
+    with open_regular(path) as f:
         f.seek(0, os.SEEK_END)
         pos, chunks, newlines = f.tell(), [], 0
         while pos > 0 and newlines <= n:
@@ -432,7 +471,7 @@ def op_logs(cfg, args):
     else:
         raise OpError("bad_config", f"日志源类型无效：{ref}")
     if pattern:
-        text_lines = [l for l in text_lines if pattern.search(l)]
+        text_lines = [l for l in text_lines if pattern.search(l[:4096])]
     text_lines = text_lines[-lines:]
     text, truncated = truncate(redact(cfg, "\n".join(text_lines)), cfg["max_output_kb"])
     res = {"source": source, "count": len(text_lines), "text": text, "truncated": truncated}
@@ -620,7 +659,7 @@ def op_config_restore(cfg, args):
     bid = args.get("backup") or (backups[0] if backups else None)
     if not bid or bid not in backups:
         raise OpError("no_backup", f"备份不存在：{bid}", available=backups[:10])
-    with open(os.path.join(backup_dir(cfg, name), bid + ".bak"), "rb") as f:
+    with open_regular(os.path.join(backup_dir(cfg, name), bid + ".bak")) as f:
         target = f.read()
     with Lock(cfg, "config-" + name):
         raw = read_text(entry["path"])
@@ -729,6 +768,16 @@ def env_set(text, var, value):
     return text + ("" if text.endswith("\n") or not text else "\n") + f"{var}={value}\n"
 
 
+def check_root_owned(path):
+    """以 root 执行的脚本：它和所在目录都必须归 root 且不可被他人写，否则等于把 root 交给了写入者。"""
+    if not (hasattr(os, "geteuid") and os.geteuid() == 0):
+        return
+    for p in (path, os.path.dirname(os.path.abspath(path))):
+        st = os.lstat(p)
+        if stat.S_ISLNK(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+            raise OpError("insecure_script", f"{p} 必须归 root、不是符号链接、且不可被 group/other 写")
+
+
 def deploy_switch(cfg, d, version):
     """切换到 version，返回 (ok, output)。"""
     if d["type"] == "compose-image":
@@ -740,6 +789,7 @@ def deploy_switch(cfg, d, version):
         rc, out, err = run(argv, timeout=d.get("timeout", 300))
         return rc == 0, (out + err).strip()[-3000:]
     if d["type"] == "script":
+        check_root_owned(d["run"])
         rc, out, err = run([d["run"]], timeout=d.get("timeout", 300), env={"VERSION": version})
         return rc == 0, (out + err).strip()[-3000:]
     raise OpError("bad_config", f"部署类型无效：{d.get('type')}")
@@ -833,6 +883,16 @@ def handle(req, config_path=None):
         return {"ok": False, "error": "internal", "message": f"{type(e).__name__}: {e}"}
 
 
+HARD_TIMEOUT = {"deploy": 900, "config_edit": 300, "config_restore": 300, "service": 300}
+
+
+def arm_watchdog(op):
+    """整个进程的硬超时：兜住灾难性正则回溯等任何卡死情况（Gateway 断开后 root 进程不能一直留着）。"""
+    if hasattr(signal, "alarm"):
+        signal.signal(signal.SIGALRM, lambda *_: os._exit(124))
+        signal.alarm(HARD_TIMEOUT.get(op, 90))
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     config_path = None
@@ -852,6 +912,9 @@ def main(argv=None):
     else:
         try:
             req = json.loads(raw.decode("utf-8") or "{}")
+            if not isinstance(req, dict):
+                raise ValueError
+            arm_watchdog(req.get("op"))
             resp = handle(req, config_path)
         except ValueError:
             req, resp = {}, {"ok": False, "error": "bad_request", "message": "请求不是合法 JSON"}

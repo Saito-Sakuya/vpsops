@@ -10,7 +10,13 @@ Bot 内置在 Gateway 中，随 `vpsops-gateway` 启停，通过长轮询接收�
 
 在 Telegram 打开官方 [@BotFather](https://t.me/BotFather)，发送 `/newbot`，按提示设置名字和用户名，保存它给你的 Bot Token。打开新机器人的私聊，点击 **Start**，再发送一条 `vpsops setup`。
 
-建议使用专用 Bot 和自己的私聊。当前实现只校验 `chat_id`；若配置群聊，群内能点击审批卡片的人都可能授权操作。Bot 不处理普通消息，所以此时没有回复也正常。
+建议使用专用 Bot 和自己的私聊。Gateway 对每个按钮回调做三项校验，任何一项不满足都会拒绝并写审计日志：
+
+1. 回调来自配置的 `chat_id`；
+2. 点击者的用户 id 在 `approvers` 中。私聊时默认就是 `chat_id` 本身；**`chat_id` 为群聊（负数）时必须显式配置 `approvers`，否则 Gateway 拒绝启动**；
+3. 按钮所在的消息正是 Gateway 为该请求发出的那条卡片（防止伪造 callback_data）。
+
+授权后卡片按钮会被移除，重复点击不会让同一操作执行两次。Bot 不处理普通消息，所以此时没有回复也正常。
 
 以下命令在已安装 Gateway 的跳板机上运行。用编辑器把 Token 写成一行，避免放进聊天、命令历史或仓库；这是 Telegram Bot Token，与各 AI 客户端的 vpsops Token 不同。
 
